@@ -1,2 +1,2 @@
-python train.py --save_fre 1 --val_fre 1 --batch_size 8 --sample_points 4096 \
- --vposer_path vposer_v1_0
+CUDA_VISIBLE_DEVICES=1 python train.py --batch_size 8 --sample_points 4096 \
+    --save_fre 10 --val_fre 1 

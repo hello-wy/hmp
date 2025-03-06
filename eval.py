@@ -10,8 +10,9 @@ import torch
 from torch.utils.data import DataLoader
 from dataset import gimo_dataset_with_motion_label
 from config.config import MotionFromInentionConfig
-from model.model import MotionPred
+from model.model_test import FullModel as MotionPred
 from utils.logger import MetricTracker
+from utils.vis_utils import visualize_SMPLXjoints,visualize_gaze
 
 
 class Motion_evalutor():
@@ -28,7 +29,7 @@ class Motion_evalutor():
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     def eval(self):
-        model = MotionPred(config, ).to(self.device)
+        model = MotionPred(config).to(self.device)
         model = model.to(self.device)
         assert self.config.load_model_dir is not None
         print('loading pretrained model from ', self.config.load_model_dir)
@@ -52,8 +53,13 @@ class Motion_evalutor():
                 joints_label = joints_label.to(self.device)
 
                 motion_label = motion_label.to(self.device)
-                joints_predict, pred_motion_label = model(joints_input[:, :, :23], scene_points, gazes)
-
+                joints_predict, pred_motion_label = model(scene_points,joints_input[:, :, :23], gazes)
+                
+                visualize_gaze(gazes[0,:,0,:].detach().cpu(),i,"/data/wuyang/MM/output/vis_test")
+                visualize_SMPLXjoints(joints_predict[0,:,:,:].detach().cpu(),scene_points[0,:,:].detach().cpu(),i,"/data/wuyang/MM/output/vis_test")
+                visualize_SMPLXjoints(joints_label[0, :, :23].detach().cpu(),scene_points[0,:,:].detach().cpu(),i,"/data/wuyang/MM/output/vis_test/label")
+                
+                
                 loss_trans_gcn, loss_des_trans_gcn, mpjpe_gcn, des_mpjpe_gcn = \
                     self.calc_loss_gcn(joints_predict, joints_label[:, :, :23], joints_input[:, :, :23])
 

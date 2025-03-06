@@ -1,9 +1,7 @@
-"""
-Authors: Yi Lin, Wang Jie Xia  
+"""  
 Date: November 10, 2024 - January 10, 2025  
 Code adapted from: https://github.com/kjle6/SIF3D-master  
 License: [MIT License]  
-For inquiries: [17857150773@163.com]
 """
 
 import torch
@@ -117,7 +115,6 @@ class EndingMotionGenerator(nn.Module):
         out = out.view(B, 23, 3)        # reshape成 (B, 23, 3)
         return out
 
-
 class MotionPred(nn.Module):
     """
     Core Model:
@@ -220,7 +217,7 @@ class MotionPred(nn.Module):
                 # Set bias terms to 0
                 param.data.fill_(0)
     
-    def forward(self, joints, scene_xyz, gazes):
+    def forward(self, scene_xyz, joints, gazes):
         """
         joints: (B, T, 23, 3)  History frames
         scene_xyz: (B, N, 3)   Scene point cloud
@@ -337,3 +334,7 @@ class MotionPred(nn.Module):
             predictions = self.motion_GCN2(predictions)
         
         return predictions, motion_label
+
+
+
+

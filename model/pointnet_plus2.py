@@ -115,13 +115,16 @@ class PointNet2SemSegSSG(PointNet2ClassificationSSG):
 
 class PointNet2SemSegSSGShape(PointNet2ClassificationSSG):
     def _build_model(self):
+        if 'input_dim' not in self.hparams:
+            self.hparams['input_dim'] = 3
+            
         self.SA_modules = nn.ModuleList()
         self.SA_modules.append(
             PointnetSAModule(
                 npoint=512,
                 radius=0.2,
                 nsample=64,
-                mlp=[3, 64, 64, 128],
+                mlp=[self.hparams['input_dim'], 64, 64, 128],
                 use_xyz=True,
             )
         )
@@ -142,19 +145,19 @@ class PointNet2SemSegSSGShape(PointNet2ClassificationSSG):
         )
 
         self.FP_modules = nn.ModuleList()
-        self.FP_modules.append(PointnetFPModule(mlp=[128 + 3, 128, 128, 128]))
+        self.FP_modules.append(PointnetFPModule(mlp=[128 + self.hparams['input_dim'], 128, 128, 128]))
         self.FP_modules.append(PointnetFPModule(mlp=[256 + 128, 256, 128]))
         self.FP_modules.append(PointnetFPModule(mlp=[256 + 256, 256, 256]))
 
         self.fc_layer = nn.Sequential(
             nn.Conv1d(128, self.hparams['feat_dim'], kernel_size=1, bias=False),
             nn.BatchNorm1d(self.hparams['feat_dim']),
-            nn.ReLU(True),
+            nn.ReLU(inplace=False),
         )
         self.fc_layer2 = nn.Sequential(
             nn.Linear(256, self.hparams['feat_dim']),
             nn.BatchNorm1d(self.hparams['feat_dim']),
-            nn.ReLU(True),
+            nn.ReLU(inplace=False),
         )
 
     def forward(self, pointcloud):
@@ -207,6 +210,9 @@ class PointNet(nn.Module):
         x = torch.relu(self.bn3(self.conv3(x)))
         x = x.max(dim=-1)[0]
         return x
+
+
+# class PointDownSample()
 
 
 if __name__ == '__main__':

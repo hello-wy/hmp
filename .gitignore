@@ -1,0 +1,5 @@
+.vscode
+__pycache__
+*.pyc
+__init__.py
+Pointnet2_PyTorch

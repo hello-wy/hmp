@@ -20,8 +20,7 @@ from pointnet2_ops import pointnet2_utils
 from scipy.spatial.transform import Rotation
 from config.config import MotionFromInentionConfig
 from torch.utils.data import DataLoader
-from torchvision import transforms
-from scipy.spatial.transform import Rotation
+from utils.vis_utils import visualize_Scene_wo_color,visualize_SMPLXjoints
 
 
 class EgoEvalDataset(data.Dataset):
@@ -43,14 +42,7 @@ class EgoEvalDataset(data.Dataset):
         self.dataset_info = pd.read_csv(os.path.join(self.dataroot, 'dataset_with_motion_label.csv'))
         self.parse_data_info()
 
-        # self.transform = transforms.Compose([
-        #     transforms.Resize(224),
-        #     transforms.ToTensor(),
-        #     transforms.Normalize((0.485, 0.456, 0.406),
-        #                          (0.229, 0.224, 0.225))
-        # ])
-        # self.random_ori_list = [-180, -90, 0, 90]
-        
+        # If this is the first time, preprocess raw dataset, this would take ~1min.
         os.makedirs(os.path.join(self.dataroot, folder), exist_ok=True)
         if not os.path.exists(os.path.join(self.dataroot, folder, split)):
             self.preprocess_dataset(folder, split)
@@ -74,7 +66,7 @@ class EgoEvalDataset(data.Dataset):
         joints_label = self.joints_label[index]
         scene_points = self.scenes[index]
         motion_label = self.motion_labels[index]
-
+        
         return gazes, poses_input, poses_label, joints_input, joints_label, scene_points, seq, scene, motion_label
 
     def __len__(self):
@@ -148,7 +140,7 @@ class EgoEvalDataset(data.Dataset):
             R_s = transform_pose[:3, :3] @ R
             ori_s = Rotation.from_matrix(R_s).as_rotvec()
             trans_s = (transform_pose[:3, :3] @ trans + transform_pose[:3, 3:]).reshape(3)
-            
+
             poses_input.append(
                 torch.cat([torch.from_numpy(ori_s.copy()).float(), torch.from_numpy(trans_s.copy()).float(),
                            pose_data['latent']]))
@@ -186,25 +178,29 @@ class EgoEvalDataset(data.Dataset):
 
         poses_label = torch.stack(poses_label, dim=0).detach()
 
-        scene_points = self.scenes_raw[scene]
+        scene_points = self.scene_list['{}_{}'.format(seq, start_frame)]
         transform_norm = torch.from_numpy(transform_norm).float()
         scene_points *= 1 / scale
         scene_points = (transform_norm[:3, :3] @ scene_points.T + transform_norm[:3, 3:]).T
         scene_points = scene_points.cpu()
 
+            
         return gazes, poses_input, poses_label, scene_points, motion_label
 
     def _load_raw_scene(self, sample_points=32768):
-        for i, scene_name in enumerate(self.dataset_info['scene']):
-            if self.scenes_raw.get(scene_name, None) is None:
-                print('loading scene of {}'.format(scene_name))
-                scene_ply = trimesh.load_mesh(os.path.join(self.dataroot, scene_name, 'scene_obj', 'scene_downsampled.ply'))
-                points = scene_ply.vertices[np.random.choice(range(len(scene_ply.vertices)), 65536)]
-                with torch.no_grad():
-                    points = torch.from_numpy(points).float().cuda().unsqueeze(0)
-                    new_idx = pointnet2_utils.furthest_point_sample(points, sample_points).squeeze().long().cpu()
-                    points = points.squeeze().cpu()[new_idx]
-                self.scenes_raw[scene_name] = points.cpu()
+        self.scene_list = {}
+        for i, seq in enumerate(self.dataset_info['sequence_path']):
+            print('loading scene of {}'.format(seq))
+            scene = self.dataset_info['scene'][i]
+            start_frame = self.dataset_info['start_frame'][i]
+            scene_ply = trimesh.load_mesh(os.path.join(self.dataroot, scene, 'scene_obj', 'scene_downsampled.ply'))
+            points = scene_ply.vertices[np.random.choice(range(len(scene_ply.vertices)), 65536)]
+            with torch.no_grad():
+                points = torch.from_numpy(points).float().cuda().unsqueeze(0)
+                new_idx = pointnet2_utils.furthest_point_sample(points, sample_points).squeeze().long().cpu()
+                points = points.squeeze().cpu()[new_idx]
+
+            self.scene_list['{}_{}'.format(seq, start_frame)] = points
 
     def _latent_to_joints(self, poses_full, vposer, body_model):
         joints_full = []
@@ -226,7 +222,7 @@ class EgoEvalDataset(data.Dataset):
         return torch.stack(joints_full, dim=0)
 
     def preprocess_dataset(self, folder, split):
-        self.scenes_raw = dict()
+        # self.scenes_raw = dict()
         self._load_raw_scene(sample_points=self.config.sample_points)
 
         vposer, _ = load_vposer(self.config.vposer_path, vp_model='snapshot')
@@ -246,8 +242,11 @@ class EgoEvalDataset(data.Dataset):
         motion_label_full = []
 
         print('loading poses')
+        
         for i in range(self.__len__()):
             gaze, pose_input, pose_label, scene_points, motion_label = self._get_raw_item(i)
+            seq = self.sequences_path_list[i]
+                
             gaze_full.append(gaze)
             pose_input_full.append(pose_input)
             pose_label_full.append(pose_label)
@@ -261,7 +260,13 @@ class EgoEvalDataset(data.Dataset):
 
         pose_full = torch.cat([pose_input_full, pose_label_full], dim=1).cuda()
         joints = self._latent_to_joints(pose_full, vposer, body_model)
+        
         joints_input, joints_label = joints[:, :self.config.input_seq_len], joints[:, self.config.input_seq_len:]
+        
+        for i in range(self.__len__()):
+            seq = self.sequences_path_list[i]
+            if seq =='2022-02-17-055440':
+                visualize_SMPLXjoints(joints_input[i,:,:23,:],scene_points_full[i],i,"/data/wuyang/MM/vis_scene/055440_motify")
 
         data_dir = os.path.join(self.dataroot, folder, split)
         os.makedirs(data_dir, exist_ok=True)
@@ -273,30 +278,12 @@ class EgoEvalDataset(data.Dataset):
         torch.save(scene_points_full, os.path.join(data_dir, "scene_points_" + str(self.config.sample_points) + ".pth"))
         torch.save(motion_label_full, os.path.join(data_dir, "motion_label.pth"))
 
-    # def trans_data(self, scene, joints, gaze):
-    #     random_ori = np.random.choice(self.random_ori_list)
-    #     random_rotation = Rotation.from_euler('xyz', [0, random_ori, 0], degrees=True).as_matrix()
-    #     ori_s = Rotation.from_matrix(random_rotation @ R_s).as_rotvec()
-    #     trans_s = (random_rotation @ trans_s.reshape((3, 1))).reshape(3)
-
-    #     for f in range(self.input_seq_len):
-    #         poses_input[f, :3] = torch.from_numpy(ori_s.copy()).float()
-    #         poses_input[f, 3:6]
-    #     gaze_points = (random_rotation @ gaze_points.T).T
-        
-        
-    #     scene_points = (random_rotation @ scene_points.T).T
-    #     scene_points += np.random.normal(loc=0, scale=self.config.sigma, size=scene_points.shape)
-        
-        
-    #     return data
 
 if __name__ == '__main__':
     config = MotionFromInentionConfig().parse_args()
     test_loader = DataLoader(
-        EgoEvalDataset(config, train=True),
+        EgoEvalDataset(config, train=False),
         batch_size=1,
         shuffle=False,
         num_workers=4,
     )
-    # EgoEvalDataset(MotionFromInentionConfig(), train=False)
