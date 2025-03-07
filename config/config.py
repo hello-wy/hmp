@@ -27,6 +27,7 @@ class MotionFromInentionConfig(ArgumentParser):
         self.motion_configs.add_argument('--motion_hidden_dim', default=256, type=int)
         self.motion_configs.add_argument('--N_prox_traj', type=int, default=4, help='Number of prox traj cross-attention repeats')
         self.motion_configs.add_argument('--N_long_traj', type=int, default=4, help='Number of long traj some parameter A')
+        
         self.motion_configs.add_argument('--N_k', type=int, default=4, help='Number of prox traj cross-attention repeats')
         self.motion_configs.add_argument('--N_a', type=int, default=4, help='Number of long traj some parameter A')
         self.motion_configs.add_argument('--N_b', type=int, default=8, help='Number of some parameter B')

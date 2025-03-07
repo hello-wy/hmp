@@ -56,11 +56,18 @@ class Motion_evalutor():
         if not os.path.exists(config.save_path):
             os.makedirs(config.save_path, exist_ok=True)
         self.logger = create_logger(config.save_path)
-        self.best_result = {}
+        self.best_results = {
+            "loss_trans": float("inf"),
+            "loss_des_trans": float("inf"),
+            "mpjpe": float("inf"),
+            "des_mpjpe": float("inf")
+        }
+    def count_parameters(self,model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     def train(self):
-        train_metrics = MetricTracker('loss_trans', 'loss_des_trans', 'mpjpe', 'des_mpjpe')
-
+        # train_metrics = MetricTracker('loss_trans', 'loss_des_trans', 'mpjpe', 'des_mpjpe')
+        print("Model parameters:"+str(self.count_parameters(self.model)))
         for epoch in range(config.epoch):
             for data in tqdm(self.train_loader):
                 gazes, poses_input, poses_label, joints_input, joints_label, scene_points, seq, scene, motion_label = data
@@ -73,7 +80,7 @@ class Motion_evalutor():
                 joints_label = joints_label.to(self.device)
                 motion_label = motion_label.to(self.device)
                 
-                visualize_SMPLXjoints(joints_label[0,:,:23,:].cpu(),scene_points[0,:,:].cpu(),100,"/data/wuyang/MM/upSample")
+                # visualize_SMPLXjoints(joints_label[0,:,:23,:].cpu(),scene_points[0,:,:].cpu(),100,"/data/wuyang/MM/upSample")
                 #train
                 joints_predict, pred_motion_label = self.model(scene_points, joints_input[:, :, :23,:], gazes)
                 loss_trans_gcn, loss_des_trans_gcn, mpjpe_gcn, des_mpjpe_gcn = self.calc_loss_gcn(joints_predict, joints_label[:, :, :23], joints_input[:, :, :23])
@@ -92,14 +99,14 @@ class Motion_evalutor():
                     loss.backward()
                     self.optim.step()
 
-                train_metrics.update("loss_trans", loss_trans_gcn[:, 6:].mean(), gazes.shape[0])
-                train_metrics.update("loss_des_trans", loss_des_trans_gcn.mean(), gazes.shape[0])
-                train_metrics.update("mpjpe", mpjpe_gcn[:, 6:].mean(), gazes.shape[0])
-                train_metrics.update("des_mpjpe", des_mpjpe_gcn, gazes.shape[0])
+                # train_metrics.update("loss_trans", loss_trans_gcn[:, 6:].mean(), gazes.shape[0])
+                # train_metrics.update("loss_des_trans", loss_des_trans_gcn.mean(), gazes.shape[0])
+                # train_metrics.update("mpjpe", mpjpe_gcn[:, 6:].mean(), gazes.shape[0])
+                # train_metrics.update("des_mpjpe", des_mpjpe_gcn, gazes.shape[0])
 
             self.lr_adjuster.step()
-            train_metrics.log(self.logger, epoch,train=True)
-            train_metrics.reset()
+            # train_metrics.log(self.logger, epoch,train=True)
+            # train_metrics.reset()
 
             if epoch % config.val_fre == 0:
                 self.model.eval()
@@ -135,16 +142,17 @@ class Motion_evalutor():
         test_metrics.log(self.logger, epoch, train=False)
         test_metrics.reset()
         
-        if not self.best_result:
-            self.best_result = test_metrics.result()
-        # 检查 4 个指标是否都大于当前结果
-        elif (self.best_result['des_mpjpe'] > test_metrics.result()['des_mpjpe'] and
-            self.best_result['loss_trans'] > test_metrics.result()['loss_trans'] and
-            self.best_result['loss_des_trans'] > test_metrics.result()['loss_des_trans'] and
-            self.best_result['mpjpe'] > test_metrics.result()['mpjpe']):
-            self.best_result = test_metrics.result()
-            print(f"best result: {self.best_result}")
-
+        current_results = {
+            "loss_trans": loss_trans_gcn[:, 6:].mean().item(),
+            "loss_des_trans": loss_des_trans_gcn.mean().item(),
+            "mpjpe": mpjpe_gcn[:, 6:].mean().item(),
+            "des_mpjpe": des_mpjpe_gcn.item()
+        }
+            
+        if all(current_results[key] < self.best_results[key] for key in current_results):
+            self.best_results = current_results  # 更新最优值
+            print(f"New best results at epoch {epoch}: {self.best_results}")
+                
     def calc_loss_gcn(self, poses_predict, poses_label, poses_input):
         poses_label = torch.cat([poses_input, poses_label], dim=1)
         loss_trans = torch.norm(poses_predict[:, :, 0] - poses_label[:, :, 0], dim=-1)

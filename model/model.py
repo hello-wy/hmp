@@ -235,15 +235,15 @@ class MotionPred(nn.Module):
         X_masked = torch.cat([joints, future_mask_joints], dim=1)  # (B, T+ΔT, 23, 3)
 
         # ========== 2. Encode Motion / Scene / Trajectory ==========
-        F_X = self.pose_encoder(joints) 
-        fp_features, bottleneck_feats = self.scene_encoder(scene_xyz.repeat(1,1,2))
-        F_SS = fp_features.transpose(1, 2)
-        F_traj_1 = self.traj_encoder(gazes)# (B, T, 64)
-        F_traj_last = F_traj_1[:,[-1],:].repeat(1,10,1)
-        F_traj = torch.cat([F_traj_1,F_traj_last],dim = 1)
+        motion_feat = self.pose_encoder(joints) 
+        scene_feat_local, bottleneck_feats = self.scene_encoder(scene_xyz.repeat(1,1,2))
+        scene_feat = scene_feat_local.transpose(1, 2)
+        gaze_feat = self.traj_encoder(gazes)# (B, T, 64)
+        F_traj_last = gaze_feat[:,[-1],:].repeat(1,10,1)
+        filled_traj = torch.cat([gaze_feat,F_traj_last],dim = 1)
         
         # ========== 3. Compute W: Based on gaze distance to scene point cloud ==========
-
+        # gaze afford map W
         gaze_0 = gazes[:, 0, 0, :]  # (B, 3)
         dist = torch.norm(scene_xyz - gaze_0.unsqueeze(1), dim=-1, keepdim=True)
         dist_min, dist_max = dist.min(dim=1, keepdim=True)[0], dist.max(dim=1, keepdim=True)[0] 
@@ -254,27 +254,28 @@ class MotionPred(nn.Module):
         
         # ========== 4. Multimodal Cross-Attention ==========
         # 4.1 Scene Point Cloud with W
-        F_S = F_SS.clone()
+        scene_feat_clone = scene_feat.clone()
         for layer in self.f_s_cross_att:
-            F_S = layer(F_S, W)  # (B, N, 128)
+            scene_feat_clone = layer(scene_feat_clone, W)  # (B, N, 128)
 
-        F_S_pooled = F_S.mean(dim=1, keepdim=True)
+        #TODO: ?
+        F_S_pooled = scene_feat_clone.mean(dim=1, keepdim=True)
         F_S_tiled  = F_S_pooled.repeat(1, T+self.output_seq_len, 1)  # (B, T+ΔT, 128)
 
         # 4.2 Scene Point Cloud with Motion Sequence
-        F_XS = F_X.clone()
+        motion_feat_clone = motion_feat.clone()
         for layer in self.xs_cross_att:
-            F_XS = layer(F_XS, F_S_tiled)  # (B, T+ΔT, 128)
+            motion_feat_clone = layer(motion_feat_clone, F_S_tiled)  # (B, T+ΔT, 128)
 
         # 4.3 Scene Point Cloud with Trajectory Sequence
-        F_TS = F_traj.clone()  
+        filled_traj_clone = filled_traj.clone()  
         for layer in self.ts_cross_att:
-            F_TS = layer(F_TS, F_S_tiled)  # (B, T, 64)
+            filled_traj_clone = layer(filled_traj_clone, F_S_tiled)  # (B, T, 64)
 
 
-        # ========== 5. Motion Prediction (Differentiable Priors) ==========
-        # 5.1 Concatenate: [F_XS, F_X] -> Motion label logits
-        cat_feat = torch.cat([F_XS, F_X], dim=-1)
+        #region ========== 5. Motion Prediction (Differentiable Priors) ==========
+        # 5.1 Concatenate: [motion_feat_clone, motion_feat] -> Motion label logits
+        cat_feat = torch.cat([motion_feat_clone, motion_feat], dim=-1)
         motion_logits = self.motion_type_mlp(cat_feat)
         motion_logits_last = motion_logits[:, -1, :]
         motion_label = torch.argmax(motion_logits_last, dim=-1)
@@ -299,25 +300,25 @@ class MotionPred(nn.Module):
         pred_embed = pred_embed.transpose(0, 1)               # (B, T, 128)
         pred_flat  = self.pose_output_proj(pred_embed)        # (B, T, 69)
         pred_motion = pred_flat.reshape(B, self.seq_len, self.joint_num, 3)
-
+        #endregion
         # ========== 7. Trajectory Prediction ==========
 
         H = scene_xyz[..., [2]]
         phi,_ =torch.max(H, dim=1, keepdim=True)
         phi /= 2
         M = (H > phi).float()
-        F_SM = F_S * (1 - M)  # (B, N, 128)
-        F_STS = F_TS.clone()  # [B,6,64]
+        scene_feat_masked = scene_feat_clone * (1 - M)  # (B, N, 128)
+        traj_scene_feat = filled_traj_clone.clone()  # [B,6,64]
 
         for layer in self.fm_cross_att:  # If matching N_d, it can be swapped with self.sts_cross_att
-            F_STS = layer(F_STS, F_SM)
+            traj_scene_feat = layer(traj_scene_feat, scene_feat_masked)
         
-        F_STS = F_STS[:,6:,:]
-        F_STS = torch.cat([F_traj_1,F_STS],dim = 1)
+        traj_scene_feat = traj_scene_feat[:,6:,:]
+        traj_scene_feat = torch.cat([gaze_feat,traj_scene_feat],dim = 1)
 
         # 7.x Use TransformerFilling to Predict Future Trajectory
 
-        Traj_embed = self.traj_input_mlp(F_STS).transpose(0, 1)
+        Traj_embed = self.traj_input_mlp(traj_scene_feat).transpose(0, 1)
         pred_traj_embed = self.traj_transformer(Traj_embed, Traj_embed) 
         pred_traj_embed = pred_traj_embed.transpose(0, 1) 
         pred_traj = self.traj_output_mlp(pred_traj_embed) # (B, T+ΔT, 3)

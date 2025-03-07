@@ -179,7 +179,7 @@ class HumanGazeSceneUpSample(nn.Module):
         pelvis_seq: pelvis坐标 (len,3)
         num_points: 采样点数 
         """
-        TRAJ_PAD = 1.0
+        TRAJ_PAD = 2.0
         REGION_SIZE = 2.0
 
         scene_trans = np.array([0,0,0],dtype=np.float32).reshape(1,3) #TODO: 1,3 scene_trans ??
@@ -187,7 +187,7 @@ class HumanGazeSceneUpSample(nn.Module):
         traj_max = pelvis_seq.max(axis=0)[0:2] # [2,] 最大点（x，y）
         traj_min = pelvis_seq.min(axis=0)[0:2] # [2,] 最小的
         traj_size = traj_max - traj_min # [2,] 
-        traj_size = traj_size + TRAJ_PAD * np.exp(-traj_size)
+        traj_size = traj_size + TRAJ_PAD * np.exp(-traj_size)   # 轨迹变大
 
         pad = (REGION_SIZE - traj_size) / 2
         pad = np.maximum(pad, [0, 0])
@@ -239,18 +239,36 @@ class HumanGazeSceneUpSample(nn.Module):
                 close_indices = np.where(labels == largest_cluster)[0]
                 gaze = gaze[close_indices][:,0,:]
             else:
-                gaze = gaze[-1:,0,:]    # 最后一帧 
+                gaze = gaze[0:,0,:]    # 第一帧 
                 
             gaze_points = self.cutScene(scene, gaze, self.ng)
             
             human_scene.append(scene_points)
             gaze_scene.append(gaze_points)
         
-        human_scene = torch.tensor(human_scene).cuda()
-        gaze_scene = torch.tensor(gaze_scene).cuda()
+        human_scene = np.array(human_scene)  
+        human_scene = torch.from_numpy(human_scene).cuda()
+        
+        gaze_scene = np.array(gaze_scene)  
+        gaze_scene = torch.from_numpy(gaze_scene).cuda()
+        
         return human_scene,gaze_scene
     
-        
+    def humanUpSample(self,scene_data,joints):
+        human_scene=[]
+        for i in range(scene_data.shape[0]):
+            scene = scene_data[i].cpu().numpy()    
+            
+            pose_seq = joints[i].cpu().numpy()
+            pose_seq = pose_seq.copy().astype(np.float32)
+            pelvis_seq = pose_seq[:,[0],:].reshape(-1,3) # len, 3 所有帧的pelvis坐标
+            scene_points = self.cutScene(scene, pelvis_seq, self.nh)
+            
+            human_scene.append(scene_points)
+        human_scene = np.array(human_scene)  
+        human_scene = torch.from_numpy(human_scene).cuda()
+        return human_scene
+    
     def forward(self, scene_points: torch.Tensor, joints: torch.Tensor, 
                 gazes: torch.Tensor, ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Human-centered upsampling
@@ -258,10 +276,10 @@ class HumanGazeSceneUpSample(nn.Module):
             scene_points, joints, gazes
         )
         
-        visualize_partly_upsample_scene(human_center_points[0,:,:3].cpu().detach().numpy(),"/data/wuyang/MM/upSample/humancenter")
-        visualize_partly_upsample_scene(gaze_center_points[0,:,:3].cpu().detach().numpy(), "/data/wuyang/MM/upSample/gazecenter")
-        visualize_SMPLXjoints(joints[0,:,:,:].cpu(),scene_points[0,:,:].cpu(),0,"/data/wuyang/MM/upSample")
-        visualize_gaze(gazes[0,:,0,:].cpu(),0,"/data/wuyang/MM/upSample")
+        # visualize_partly_upsample_scene(human_center_points[0,:,:3].cpu().detach().numpy(),"/data/wuyang/MM/upSample/humancenter")
+        # visualize_partly_upsample_scene(gaze_center_points[0,:,:3].cpu().detach().numpy(), "/data/wuyang/MM/upSample/gazecenter")
+        # visualize_SMPLXjoints(joints[0,:,:,:].cpu(),scene_points[0,:,:].cpu(),0,"/data/wuyang/MM/upSample")
+        # visualize_gaze(gazes[0,:,0,:].cpu(),0,"/data/wuyang/MM/upSample")
         
         human_center_feat,_ = self.humanEncoder(human_center_points.repeat(1,1,2))  # [B, Nh, 16]
         human_center_feat = human_center_feat.transpose(1, 2)
@@ -292,27 +310,33 @@ class TrajectoryPlanner(nn.Module):
             for _ in range(config.N_long_traj)
         ])
         
-        self.traj_transformer = TransformerFilling(d_model=self.dimension,  nhead=8, num_layers=config.N_e)
         self.traj_input_mlp   = nn.Linear(self.dimension, self.dimension, bias=False).to(self.device)
+        self.traj_transformer = TransformerFilling(d_model=self.dimension,  nhead=8, num_layers=config.N_e)
         self.traj_output_mlp  = nn.Linear(self.dimension, 3, bias=False).to(self.device)
 
 
-    def forward(self, scene_feat3,human_scene_feat,gaze_scene_feat,human_traj):
+    def forward(self, scene_feat3,human_scene_feat,gaze_scene_feat,gazes):
         """
         Plan next trajectory using transformer.
         """
-        B = human_traj.shape[0]
-        traj_feat = self.traj_encoder(human_traj)  # [8, 16, 128]
-
-        traj_feat_proximity = traj_feat.clone() # [8, 16, 128] 近距离 traj
+        B = gazes.shape[0]
+        gaze_feat = self.traj_encoder(gazes)  # [8, 6, 128]
+        
+        gazes_label = gazes[:,[-1],:,:].repeat(1,10,1,1)
+        gazes_filled = torch.cat([gazes,gazes_label],dim = 1)
+        gaze_feat_filled = self.traj_encoder(gazes_filled)  # [8, 6, 128]
+        
+        traj_feat_proximity = gaze_feat_filled.clone() # [8, 16, 128] 近距离 traj
         for layer in self.proximity_traj_cross_attn:
             traj_feat_proximity = layer(traj_feat_proximity, human_scene_feat)
         
-        traj_feat_long = traj_feat.clone()  # 远距离 traj
+        traj_feat_long = gaze_feat_filled.clone()  # 远距离 traj
         for layer in self.long_traj_cross_attn:
             traj_feat_long = layer(traj_feat_long, gaze_scene_feat)
 
         traj_feat_fused = self.alpha * traj_feat_proximity + (1 - self.alpha) * traj_feat_long  #8,16,64
+        traj_feat = torch.cat([gaze_feat, traj_feat_fused[:,6:,:]],dim = 1)
+        traj_feat = self.traj_input_mlp(traj_feat)
         
         H = scene_feat3[..., [2]]
         phi,_ = torch.max(H, dim=1, keepdim=True)
@@ -320,7 +344,7 @@ class TrajectoryPlanner(nn.Module):
         M = (H > phi).float()
         scene_walkable_feat = scene_feat3 * (1 - M)  # (B, 512, 64) lower then phi can walk
         
-        pred_traj_embed = self.traj_transformer(scene_walkable_feat.transpose(0, 1),traj_feat_fused.transpose(0, 1)) 
+        pred_traj_embed = self.traj_transformer(scene_walkable_feat.transpose(0, 1),traj_feat.transpose(0, 1)) 
         
         pred_traj = self.traj_output_mlp(pred_traj_embed.transpose(0,1))  # (B, T, 3)
         
@@ -364,10 +388,6 @@ class PoseReferencer(nn.Module):
         self.pose_transformer = TransformerFilling(d_model=self.dimension, nhead=8, num_layers=config.N_e)
 
     def forward(self, scene_feat3,human_scene_feat,gaze_scene_feat, human_pose) -> torch.Tensor:
-        """
-        Reference next pose using transformer.
-        """
-        
         pose_feat = self.pose_encoder(human_pose) 
     
         pose_feat_proximity = pose_feat.clone() # [8, 16, 128] 近距离 traj
@@ -393,7 +413,8 @@ class PoseReferencer(nn.Module):
         ending_motion = self.ending_gen(z) # 最后一帧的motion
         
         B, T, J, C = human_pose.shape
-        future_mask_joints = torch.zeros((B, self.output_seq_len, J, C), device=human_pose.device)
+        # future_mask_joints = torch.zeros((B, self.output_seq_len, J, C), device=human_pose.device)
+        future_mask_joints = human_pose[:,[T-1],:,:].repeat(1,10,1,1)
         motion_masked = torch.cat([human_pose, future_mask_joints], dim=1)  # (B, T+ΔT, 23, 3)
         
         motion_masked[:, -1, :, :] = ending_motion[:]
@@ -461,25 +482,19 @@ class FullModel(nn.Module):
         
     def forward(self, scene_points: torch.Tensor, human_pose: torch.Tensor, gazes: torch.Tensor) -> Tuple:
         """
-        Full forward pass of the model.
+        human_pose: [B,6,23,3]
+        gazes:[B,6,1,3]
         """
         # Global scene feature extraction
         scene_feat1, scene_feat2, scene_feat3, scene_feat4 = self.scene_extractor(scene_points)
         
-        # Human/Gaze-centered scene upsampling
+        # Human/Gaze-centered scene upsampling feat
         human_center_points, gaze_center_points = self.human_gaze_upsample(scene_points, human_pose, gazes)
-        
-        human_traj = human_pose[:, :, [0], :]
-        human_traj_label = human_traj[:,[-1],:,:].repeat(1,10,1,1) # [8, 10, 128]
-        human_traj = torch.cat([human_traj, human_traj_label],dim = 1)
-        
+
         human_scene_feat = torch.cat([scene_feat1,human_center_points],dim = 1) # [B,N/2 + Nh ,16]
         gaze_scene_feat = torch.cat([scene_feat2,gaze_center_points],dim = 1)
         
-        # Trajectory planning
-        pred_traj = self.trajectory_planner(scene_feat3,human_scene_feat,gaze_scene_feat,human_traj)
-
-        # Pose referencing
+        pred_traj = self.trajectory_planner(scene_feat3,human_scene_feat,gaze_scene_feat,gazes)
         pose_feat_fused, pred_motion, motion_label = self.pose_referencer(scene_feat3,human_scene_feat,gaze_scene_feat,human_pose)
         
         pred_motion = self.predictor(human_pose,pred_motion,pred_traj)

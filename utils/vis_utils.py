@@ -184,13 +184,15 @@ def visualize_gaze(gaze_data, i,out_dir):
     pcd = trimesh.PointCloud(vertices=gaze_data)
     npoints, _ = gaze_data.shape
     colors = np.ones((npoints, 3)) * 255
-    colors[:, 2] = 255  # B 通道，所有点设为蓝色
 
     # 将第一个点设为红色 (RGB: 255, 0, 0)
     colors[0, 0] = 255  # R 通道
     colors[0, 1] = 0    # G 通道
     colors[0, 2] = 0    # B 通道
     
+    colors[-1, 0] = 0  # R 通道
+    colors[-1, 1] = 255    # G 通道
+    colors[-1, 2] = 0    # B 通道
     pcd.visual.vertex_colors = colors
     # 导出 OBJ 文件
     pcd.export(f"{out_dir}/{i}_gaze.obj")
