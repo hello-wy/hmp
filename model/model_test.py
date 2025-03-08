@@ -267,7 +267,10 @@ class HumanGazeSceneUpSample(nn.Module):
             human_scene.append(scene_points)
         human_scene = np.array(human_scene)  
         human_scene = torch.from_numpy(human_scene).cuda()
-        return human_scene
+        
+        human_center_feat,_ = self.humanEncoder(human_scene.repeat(1,1,2))  # [B, Nh, 16]
+        human_center_feat = human_center_feat.transpose(1, 2)
+        return human_center_feat
     
     def forward(self, scene_points: torch.Tensor, joints: torch.Tensor, 
                 gazes: torch.Tensor, ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -293,7 +296,7 @@ class HumanGazeSceneUpSample(nn.Module):
 class TrajectoryPlanner(nn.Module):
     def __init__(self,config, dim: int = 64):
         super(TrajectoryPlanner, self).__init__()
-        
+        self.config = config
         self.dimension = dim
         self.traj_encoder = TrajEncoder(f_r = dim)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -313,22 +316,44 @@ class TrajectoryPlanner(nn.Module):
         self.traj_input_mlp   = nn.Linear(self.dimension, self.dimension, bias=False).to(self.device)
         self.traj_transformer = TransformerFilling(d_model=self.dimension,  nhead=8, num_layers=config.N_e)
         self.traj_output_mlp  = nn.Linear(self.dimension, 3, bias=False).to(self.device)
+        self.humanUpSample = HumanGazeSceneUpSample(config)
 
+    def subsequent_mask(self,size): 
+        B = self.config.batch_size
+        attn_shape = (B, size, size) #(B, size, size)
+         
+        subsequent_mask = torch.triu(torch.ones(attn_shape), diagonal=1).type(
+            torch.uint8
+        )
+        return subsequent_mask == 0
+    
+    def regression(self):
+        B,T,_,D =  joints.shape
+        pred_traj = []
+        window_size = 6 
+        current_input = joints[:,:,0,:].clone()  # [B, 6, 3]
+        for i in range(self.config.output_seq_len):
+            joints = current_input[:,i:i+window_size,:,:]
+            human_scene_feat = self.humanUpSample.humanUpSample(scene_raw,joints)   #B,Nh,16
+            
+            
 
-    def forward(self, scene_feat3,human_scene_feat,gaze_scene_feat,gazes):
+            tgt_mask = self.subsequent_mask(T).to(self.device)
+            
+    def forward(self, scene_feat3,scene_raw,gaze_scene_feat,joints,gazes):
         """
         Plan next trajectory using transformer.
         """
         B = gazes.shape[0]
-        gaze_feat = self.traj_encoder(gazes)  # [8, 6, 128]
-        
+        gaze_feat = self.traj_encoder(gazes)
+
         gazes_label = gazes[:,[-1],:,:].repeat(1,10,1,1)
         gazes_filled = torch.cat([gazes,gazes_label],dim = 1)
         gaze_feat_filled = self.traj_encoder(gazes_filled)  # [8, 6, 128]
         
         traj_feat_proximity = gaze_feat_filled.clone() # [8, 16, 128] 近距离 traj
         for layer in self.proximity_traj_cross_attn:
-            traj_feat_proximity = layer(traj_feat_proximity, human_scene_feat)
+            traj_feat_proximity = layer(traj_feat_proximity, scene_raw)
         
         traj_feat_long = gaze_feat_filled.clone()  # 远距离 traj
         for layer in self.long_traj_cross_attn:
@@ -345,9 +370,8 @@ class TrajectoryPlanner(nn.Module):
         scene_walkable_feat = scene_feat3 * (1 - M)  # (B, 512, 64) lower then phi can walk
         
         pred_traj_embed = self.traj_transformer(scene_walkable_feat.transpose(0, 1),traj_feat.transpose(0, 1)) 
-        
         pred_traj = self.traj_output_mlp(pred_traj_embed.transpose(0,1))  # (B, T, 3)
-        
+            
         return pred_traj.reshape(B, self.seq_len, 1, 3)
 
 class PoseReferencer(nn.Module):
@@ -494,7 +518,7 @@ class FullModel(nn.Module):
         human_scene_feat = torch.cat([scene_feat1,human_center_points],dim = 1) # [B,N/2 + Nh ,16]
         gaze_scene_feat = torch.cat([scene_feat2,gaze_center_points],dim = 1)
         
-        pred_traj = self.trajectory_planner(scene_feat3,human_scene_feat,gaze_scene_feat,gazes)
+        pred_traj = self.trajectory_planner(scene_feat3,human_scene_feat,gaze_scene_feat,human_pose,gazes)
         pose_feat_fused, pred_motion, motion_label = self.pose_referencer(scene_feat3,human_scene_feat,gaze_scene_feat,human_pose)
         
         pred_motion = self.predictor(human_pose,pred_motion,pred_traj)
