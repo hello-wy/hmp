@@ -113,10 +113,10 @@ class Motion_evalutor():
                 with torch.no_grad():
                     self.test(epoch)
                 self.model.train()
-            if epoch % config.save_fre == 0 :
+            if epoch == self.best_epoch :
                 if not os.path.exists(f"{self.config.save_path}/ckpts"):
                     os.makedirs(f"{self.config.save_path}/ckpts")
-                torch.save(self.model.state_dict(), f"{self.config.save_path}/ckpts/{epoch}.pth")
+                torch.save(self.model.state_dict(), f"{self.config.save_path}/ckpts/best.pth")
 
     def test(self, epoch):
         test_metrics = MetricTracker('loss_trans', 'loss_des_trans', 'mpjpe', 'des_mpjpe')
@@ -140,17 +140,18 @@ class Motion_evalutor():
             test_metrics.update("des_mpjpe", des_mpjpe_gcn, gazes.shape[0])
 
         test_metrics.log(self.logger, epoch, train=False)
-        test_metrics.reset()
         
         current_results = {
-            "loss_trans": loss_trans_gcn[:, 6:].mean().item(),
-            "loss_des_trans": loss_des_trans_gcn.mean().item(),
-            "mpjpe": mpjpe_gcn[:, 6:].mean().item(),
-            "des_mpjpe": des_mpjpe_gcn.item()
+            "loss_trans": test_metrics['loss_trans'],
+            "loss_des_trans": test_metrics['loss_des_trans'],
+            "mpjpe":test_metrics['mpjpe'],
+            "des_mpjpe": test_metrics['des_mpjpe']
         }
+        test_metrics.reset()
             
         if all(current_results[key] < self.best_results[key] for key in current_results):
             self.best_results = current_results  # 更新最优值
+            self.best_epoch = epoch
             print(f"New best results at epoch {epoch}: {self.best_results}")
                 
     def calc_loss_gcn(self, poses_predict, poses_label, poses_input):

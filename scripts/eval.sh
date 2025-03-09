@@ -1,1 +1,1 @@
-python eval.py --batch_size 1 --sample_points 4096
+python eval.py --batch_size 1 --sample_points 4096 --load_model_dir /data/wuyang/MM/output/ckpts/best.pth

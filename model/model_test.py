@@ -162,7 +162,7 @@ class SceneFeatureExtractor(nn.Module):
         # visualize_Scene_wo_color(scene_feat4[0,:,:3].cpu().detach().numpy(), "/data/wuyang/256")
         return scene_feat1, scene_feat2, scene_feat3, scene_feat4
 
-
+#TODO: 修改无encode 最终返回一个点云
 class HumanGazeSceneUpSample(nn.Module):
     def __init__(self, config):
         super(HumanGazeSceneUpSample, self).__init__()
@@ -313,10 +313,15 @@ class TrajectoryPlanner(nn.Module):
             for _ in range(config.N_long_traj)
         ])
         
-        self.traj_input_mlp   = nn.Linear(self.dimension, self.dimension, bias=False).to(self.device)
+        self.traj_input_mlp   = nn.Linear(3, self.dimension, bias=False).to(self.device)
         self.traj_transformer = TransformerFilling(d_model=self.dimension,  nhead=8, num_layers=config.N_e)
         self.traj_output_mlp  = nn.Linear(self.dimension, 3, bias=False).to(self.device)
         self.humanUpSample = HumanGazeSceneUpSample(config)
+        
+        for p in self.traj_transformer.parameters():
+            if p.dim() > 1:
+                torch.nn.init.xavier_uniform_(p)  # 让参数初始化更稳定
+
 
     def subsequent_mask(self,size): 
         B = self.config.batch_size
@@ -344,10 +349,23 @@ class TrajectoryPlanner(nn.Module):
         """
         Plan next trajectory using transformer.
         """
-        B = gazes.shape[0]
+        traj = joints[:, :, 0, :]  # (B, T, 3)
+
+        traj_label = traj[:, [-1], :].expand(-1, 10, -1)
+        traj_filled = torch.cat([traj, traj_label],dim = 1)
+
+        H = scene_raw[..., [2]]
+        phi,_ = torch.max(H, dim=1, keepdim=True)
+        phi /= 5.0
+        phi = torch.clamp(phi, min=1e-6)  # 避免 phi 变成 0
+        M = (H > phi).float()
+        scene_walkable_feat = scene_raw * (1 - M)  # (B, 512, 64) lower then phi can walk
+        
+
+        B ,T,_,_= gazes.shape
         gaze_feat = self.traj_encoder(gazes)
 
-        gazes_label = gazes[:,[-1],:,:].repeat(1,10,1,1)
+        gazes_label = gazes[:, [-1], :, :].expand(-1, 10, -1, -1)
         gazes_filled = torch.cat([gazes,gazes_label],dim = 1)
         gaze_feat_filled = self.traj_encoder(gazes_filled)  # [8, 6, 128]
         
@@ -361,15 +379,15 @@ class TrajectoryPlanner(nn.Module):
 
         traj_feat_fused = self.alpha * traj_feat_proximity + (1 - self.alpha) * traj_feat_long  #8,16,64
         traj_feat = torch.cat([gaze_feat, traj_feat_fused[:,6:,:]],dim = 1)
-        traj_feat = self.traj_input_mlp(traj_feat)
+
         
-        H = scene_feat3[..., [2]]
-        phi,_ = torch.max(H, dim=1, keepdim=True)
-        phi /= 5.0
-        M = (H > phi).float()
-        scene_walkable_feat = scene_feat3 * (1 - M)  # (B, 512, 64) lower then phi can walk
+        traj_filled_feat = self.traj_input_mlp(traj_filled)
+        # tranformer mask
+        tgt_mask = torch.zeros((self.seq_len, self.seq_len)).float()  # 初始化为 0
+        tgt_mask[:6, :] = 0  # 让前6帧可见
+        tgt_mask[6:, :] = float('-inf')  # 屏蔽6帧之后的部分
         
-        pred_traj_embed = self.traj_transformer(scene_walkable_feat.transpose(0, 1),traj_feat.transpose(0, 1)) 
+        pred_traj_embed = self.traj_transformer(traj_feat.transpose(0, 1),traj_filled_feat.transpose(0, 1)) # ,tgt_mask=tgt_mask.cuda()
         pred_traj = self.traj_output_mlp(pred_traj_embed.transpose(0,1))  # (B, T, 3)
             
         return pred_traj.reshape(B, self.seq_len, 1, 3)
